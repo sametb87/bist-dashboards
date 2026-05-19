@@ -2,7 +2,6 @@ name: BIST Dashboards Update
 
 on:
   schedule:
-    # TR 18:30 (UTC 15:30) - BIST kapanış sonrası, hafta içi
     - cron: '30 15 * * 1-5'
   workflow_dispatch:
 
@@ -26,14 +25,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run sector_dashboard
+      - name: Run sector_dashboard (update mode)
         working-directory: ./sector_dashboard
-        run: python sector_dashboard.py
+        run: python sector_dashboard.py --update
         continue-on-error: true
 
-      - name: Run bist_breadth
+      - name: Run bist_breadth (update mode)
         working-directory: ./bist_breadth_dashboard
-        run: python bist_breadth_full.py
+        run: python bist_breadth_full.py --update
         continue-on-error: true
 
       - name: Commit and push updated dashboards
