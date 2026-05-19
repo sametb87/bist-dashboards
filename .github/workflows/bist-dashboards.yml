@@ -35,6 +35,16 @@ jobs:
         run: python bist_breadth_full.py --update
         continue-on-error: true
 
+      - name: Run trade_dashboard
+        working-directory: ./trade_dashboard
+        run: python build_trade_dashboard.py
+        continue-on-error: true
+
+      - name: Run swing_dashboard
+        working-directory: ./swing_dashboard
+        run: python swing_dashboard.py
+        continue-on-error: true
+
       - name: Commit and push updated dashboards
         run: |
           git config user.name "GitHub Actions Bot"
