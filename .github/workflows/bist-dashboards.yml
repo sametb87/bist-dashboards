@@ -1,0 +1,45 @@
+name: BIST Dashboards Update
+
+on:
+  schedule:
+    # TR 18:30 (UTC 15:30) - BIST kapanış sonrası, hafta içi
+    - cron: '30 15 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  update-bist:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run sector_dashboard
+        working-directory: ./sector_dashboard
+        run: python sector_dashboard.py
+        continue-on-error: true
+
+      - name: Run bist_breadth
+        working-directory: ./bist_breadth_dashboard
+        run: python bist_breadth_full.py
+        continue-on-error: true
+
+      - name: Commit and push updated dashboards
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add -A
+          git diff --staged --quiet || git commit -m "Auto-update BIST dashboards [$(date +'%Y-%m-%d %H:%M')]"
+          git push

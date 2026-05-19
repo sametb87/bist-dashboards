@@ -1,0 +1,42 @@
+name: US Sector Dashboard Update
+
+on:
+  schedule:
+    # TR 07:00 (UTC 04:00) - Pazartesi-Cumartesi
+    # Pzt-Cuma: önceki günün kapanışı
+    # Cumartesi: Cuma gecesi kapanışı (haftalık özet için)
+    - cron: '0 4 * * 1-6'
+  workflow_dispatch:
+
+jobs:
+  update-us:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run us_sector_dashboard
+        working-directory: ./us_sector_dashboard
+        run: python us_sector_dashboard.py
+        continue-on-error: true
+
+      - name: Commit and push updated dashboard
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add -A
+          git diff --staged --quiet || git commit -m "Auto-update US dashboard [$(date +'%Y-%m-%d %H:%M')]"
+          git push
