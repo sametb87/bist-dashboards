@@ -39,7 +39,7 @@ jobs:
 
       - name: Run trade_dashboard
         working-directory: ./trade_dashboard
-        run: python build_trade_dashboard.py
+        run: echo "trade_dashboard runs locally - PT.xlsx not in repo"
         continue-on-error: true
 
       - name: Run swing_dashboard
