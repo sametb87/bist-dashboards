@@ -2,10 +2,9 @@ name: US Sector Dashboard Update
 
 on:
   schedule:
-    # TR 07:00 (UTC 04:00) - Pazartesi-Cumartesi
-    # Pzt-Cuma: önceki günün kapanışı
-    # Cumartesi: Cuma gecesi kapanışı (haftalık özet için)
-    - cron: '0 4 * * 1-6'
+    # TR 07:23 (UTC 04:23) - Pazartesi-Cumartesi
+    # Tam saatlerden kaçınıyoruz
+    - cron: '23 4 * * 1-6'
   workflow_dispatch:
 
 jobs:

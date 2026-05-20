@@ -2,7 +2,9 @@ name: BIST Dashboards Update
 
 on:
   schedule:
-    - cron: '30 15 * * 1-5'
+    # TR 18:42 (UTC 15:42) - hafta içi, BIST kapanış sonrası
+    # Tam saatlerden kaçınıyoruz (GitHub Actions yoğunluk)
+    - cron: '42 15 * * 1-5'
   workflow_dispatch:
 
 jobs:
