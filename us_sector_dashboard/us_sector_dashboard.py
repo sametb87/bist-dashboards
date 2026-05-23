@@ -68,6 +68,7 @@ REQ_DELAY   = (0.3, 0.7)
 
 SP500_URL   = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 NDX_URL     = "https://en.wikipedia.org/wiki/Nasdaq-100"
+SP400_URL   = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
 BENCHMARKS  = ["SPY", "QQQ", "IWM"]
 
 # ─────────────────────────────────────────────
@@ -252,9 +253,10 @@ def _http_get(url, timeout=15):
     except Exception:
         return None
 
-# Hard-coded fallback (Mayıs 2026 itibarıyla S&P 500'ün büyük çoğunluğu + Nasdaq 100)
+# Hard-coded fallback (Mayıs 2026 itibarıyla)
 # Wikipedia tamamen erişilemezse devreye girer.
-_FALLBACK_TICKERS = """
+# Üç set birleşik: S&P 500 + Nasdaq 100 + S&P 400 (mid cap)
+_FALLBACK_SP500_NDX100 = """
 A AAPL ABBV ABNB ABT ACGL ACN ADBE ADI ADM ADP ADSK AEE AEP AES AFL AIG AIZ AJG
 AKAM ALB ALGN ALL ALLE AMAT AMCR AMD AME AMGN AMP AMT AMZN ANET ANSS AON AOS APA
 APD APH APO APTV ARE ATO AVB AVGO AVY AWK AXON AXP AZO BA BAC BALL BAX BBWI BBY
@@ -290,28 +292,94 @@ ODFL ON ORLY PANW PAYX PCAR PDD PEP PYPL QCOM REGN ROP ROST SBUX SHOP SMCI SNPS
 TEAM TMUS TSLA TTD TTWO TXN VRSK VRTX WBD WDAY XEL ZS
 """
 
+_FALLBACK_SP400 = """
+ACIW ACM ADC AGCO ALK ALKS ALV AM AMG AMH AN APLE APOG ARMK ARW ASB ASGN ATGE ATR
+AVNT AVT AWI AYI AZTA BC BCO BCPC BDC BERY BFAM BFH BG BHF BIO BKH BLD BLKB BMI BRBR
+BRX BWA BWXT BYD BYDD CABO CACI CADE CAR CASY CBSH CC CCL CDP CFR CGNX CHE CHRD CHX
+CIEN CIVI CLF CLH CMA CMC CNH CNM CNO CNX COHR COKE COLB COLM CONA CR CRI CRS CRUS
+CSL CTLP CUBE CUZ CVCO CW CWAN CWEN CWST CXT DAN DAR DBX DCI DECK DINO DKS DLB DNB
+DOCS DRVN DT DTM DV DVN DXC EAT EEFT EHC ELAN ELS ELY EME EME ENS ENSG ENV EPAM EPC
+EPR EQH ETD ETSY EVR EWBC EXAS EXEL FAF FBP FCN FFIN FHB FHN FIBK FIVN FIX FL FLEX
+FLG FLR FLS FN FNB FNF FNR FOUR FR FRPT FSS G GBCI GEF GGG GHC GME GMED GNL GNTX
+GO GPI GPK GTES GTLS GTY GVA GXO H HALO HAS HCM HE HELE HHC HII HII HIW HLI HOG HOMB
+HPP HRB HSII HUBG HUN HXL IART ICUI IDA IDCC IDT IGT IIPR INFA INGR INSM IOSP IRT
+ITGR ITT ITY JACK JAZZ JBL JBT JEF JLL JWN KAR KBH KBR KMT KMX KN KNF KNX KRC KRG KRYS
+LAUR LAZ LBRDA LBRDK LBTYA LBTYK LECO LEG LFUS LIVN LNW LNTH LOPE LSI LSTR LSXMA LSXMK
+LSXMB MAN MAS MASI MATX MBC MC MDP MDU MGEE MGY MIDD MKSI MLI MMS MOG-A MORN MOS MP
+MSA MSM MTH MTSI MTX MTZ MUR MUSA NARI NATL NEOG NEU NJR NNN NOG NOV NPO NSA NSP NTNX
+NVST NWE NXST NYT OC OGE OGN OHI OLED OLN OLLI ONB ONTO OSK OZK PAG PARA PB PBF PBH PCH
+PCTY PEN PENN PFGC PGR PII PINC PLNT PLXS PNFP PNM POR POST POWI PPC PR PRG PRGO PRI
+PRIM PRMW PSN PSTG PTC PVH R RBA RBC RCM RDN REXR REZI RGA RH RHI RIG RIVN RL RNG RNST
+RPM RRC RRX RUSHA RYAN RYN S SAIA SAIC SAM SANM SBCF SBNY SBRA SCI SEE SEIC SF SFM
+SHC SHO SIG SITC SITM SJW SLAB SLG SLGN SLM SLVM SM SMG SMR SNDR SNDX SNX SNV SON SPB
+SPH SPSC SR SRCL SRPT SSB SSD SSNC ST STAG STR STWD SUM SWI SXT SYNA TBLA TCBI TDOC TDS
+TDW TENB TEX TFII TFIN TGNA THC THG THO THRY TKR TKO TMHC TNDM TNET TPH TPR TPX TRMB
+TRN TROX TRU TRYG TTC TWLO TWST TYL UAA UAL UCBI UDR UFPI UGI UHS UI UMBF UNF UNFI USFD
+UTL UTHR UTL VAC VC VCEL VCR VFC VGR VIRT VLY VMI VNDA VNO VNT VRSN VSAT VST VVV WAFD
+WBS WCC WDC WDFC WEN WERN WEX WGO WH WHD WK WLK WMS WNS WOLF WOR WSO WTS WTTR WTW WU
+WYNN X XPEL XPO YELP ZD ZWS
+"""
+
+# YENİ TREND HİSSELERİ — endekslerde olmayan ama yüksek hacimli/likit hisseler
+# Bu liste yfinance üzerinden tarandığında zaten doğrulanır (info varsa, OHLC varsa kalır)
+_TRENDS_LIST = """
+AI APLD ARM CRWV NBIS WULF CORZ IREN HUT RIOT MARA CIFR HIVE CLSK BTBT BITF
+SOUN BBAI RGTI IONQ QBTS
+NNE SMR OKLO LEU NXE UEC DNN UUUU UROY
+RKLB ASTS LUNR BKSY PL SATL SPIR RDW ACHR JOBY KTOS AVAV
+AFRM HOOD SOFI UPST DAVE TOST FOUR FLYW NU XYZ HIMS RDDT DUOL CART ELF BIRK CAVA SG
+BE FCEL PLUG BLDP BLNK ENVX WBX STEM FLNC
+LITE COHR CIEN VIAV ALAB POET INFN OUST ADTN
+VICR MPWR ONTO ACLS MKSI CEVA AMBA NVMI KLIC FORM COHU SITM CRDO
+PLTR SNOW DOCN ESTC CFLT S CYBR BRZE GTLB DDOG MDB SMCI
+VKTX ALNY CRSP NTLA BEAM RXRX RCKT
+GME AMC KOSS BB
+KSCP SYM SERV PATH
+TTD APP DKNG FLUT
+HUBS MNDY BILL PAYC PCOR ZS NET
+NEM AEM WPM PAAS AG FSLR ENPH RUN ARRY SHLS
+NOC HEI TDG CACI LDOS PSN
+LULU ONON SKX ANF AEO
+CHWY CVNA DASH ABNB UBER
+TSLA RIVN LEA BWA APTV
+META PINS RDDT
+NVDA AMD AVGO MRVL ARM
+SHOP MELI ETSY PINS
+CCJ DNN
+INSW STNG FRO DHT NAT
+GLNG LNG
+ALB SQM SGML LAR
+FCX SCCO TECK HBM
+ISRG ROK FANUY
+WNS INFY
+"""
+
 def _parse_fallback_list():
-    """Hard-coded listeyi tek tekil sete dönüştür."""
-    return sorted(set(t.strip() for t in _FALLBACK_TICKERS.split() if t.strip()))
+    """Tüm fallback kaynaklarını birleştirip tekil sete dönüştür."""
+    all_text = _FALLBACK_SP500_NDX100 + " " + _FALLBACK_SP400 + " " + _TRENDS_LIST
+    return sorted(set(t.strip() for t in all_text.split() if t.strip()))
+
+def _parse_trends_list():
+    return sorted(set(t.strip() for t in _TRENDS_LIST.split() if t.strip()))
 
 def get_universe():
-    log("Universe çekiliyor: S&P 500 + Nasdaq 100...")
+    log("Universe çekiliyor: S&P 500 + Nasdaq 100 + S&P 400 + Trends...")
     universe = set()
 
-    # S&P 500
+    # 1) S&P 500
     try:
         html_text = _http_get(SP500_URL)
         if html_text:
             sp = pd.read_html(_io.StringIO(html_text))[0]
             sp_tickers = sp["Symbol"].str.replace(".", "-", regex=False).tolist()
             universe.update(sp_tickers)
-            log(f"  S&P 500: {len(sp_tickers)} ticker")
+            log(f"  S&P 500   : {len(sp_tickers)} ticker")
         else:
             raise RuntimeError("HTTP 200 alınamadı")
     except Exception as e:
         log(f"  S&P 500 hata: {e}")
 
-    # Nasdaq 100
+    # 2) Nasdaq 100
     try:
         html_text = _http_get(NDX_URL)
         if html_text:
@@ -330,18 +398,45 @@ def get_universe():
     except Exception as e:
         log(f"  Nasdaq 100 hata: {e}")
 
-    # Wikipedia'dan hiçbir şey gelmediyse fallback
-    if len(universe) < 100:
+    # 3) S&P 400 (Mid Cap)
+    try:
+        html_text = _http_get(SP400_URL)
+        if html_text:
+            tables = pd.read_html(_io.StringIO(html_text))
+            sp400_tickers = []
+            for t in tables:
+                cols = [str(c) for c in t.columns]
+                tcol = next((c for c in cols if c.lower() in ("ticker", "symbol")), None)
+                if tcol and 300 < len(t) < 450:
+                    sp400_tickers = t[tcol].astype(str).str.replace(".", "-", regex=False).tolist()
+                    break
+            universe.update(sp400_tickers)
+            log(f"  S&P 400   : {len(sp400_tickers)} ticker (mid cap)")
+        else:
+            raise RuntimeError("HTTP 200 alınamadı")
+    except Exception as e:
+        log(f"  S&P 400 hata: {e}")
+
+    # 4) Wikipedia başarısız olduysa fallback liste
+    if len(universe) < 300:
         log(f"  Wikipedia'dan {len(universe)} ticker geldi — fallback listeye geçiliyor")
         fallback = _parse_fallback_list()
         universe.update(fallback)
         log(f"  Fallback liste: {len(fallback)} ticker eklendi")
 
-    # Benchmark'ları ekle
+    # 5) Her zaman trend hisselerini ekle (endekslerde olmayan ama önemli)
+    trends = _parse_trends_list()
+    new_from_trends = [t for t in trends if t not in universe]
+    universe.update(trends)
+    if new_from_trends:
+        log(f"  Trends ekstra: {len(new_from_trends)} ticker (AFRM, BE, HIMS, RKLB, WULF, APLD, COHR vb.)")
+
+    # 6) Benchmark'ları ekle
     universe.update(BENCHMARKS)
 
     universe = sorted(universe)
-    log(f"  Toplam birleşik: {len(universe)} ticker")
+    log(f"  ───────────────────────────────")
+    log(f"  TOPLAM    : {len(universe)} ticker")
     return universe
 
 # ─────────────────────────────────────────────
