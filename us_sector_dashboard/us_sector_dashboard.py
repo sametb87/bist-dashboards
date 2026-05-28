@@ -487,7 +487,7 @@ def update_ohlc_cache(tickers, cache):
     log(f"  Zaten güncel   : {len(tickers) - len(need_full) - len(need_incr)} ticker")
 
     def fetch_full(t):
-        df = _fetch_history(t, period="1y")
+        df = _fetch_history(t, period="14mo")
         return t, (df_to_ohlc_recs(df) if df is not None else [])
 
     if need_full:
@@ -601,8 +601,18 @@ def percentile_rank(scores_dict):
     n = len(items)
     return {t: round(1 + i / max(n-1, 1) * 98) for i, (t, _) in enumerate(items)}
 
-def calc_rs5(ohlc_map):
-    """RS5: 5-gün getiri bazlı percentile."""
+def _bench_return(bench_closes, n):
+    """Benchmark'ın n-gün önceki kapanışına göre dönüşü."""
+    if bench_closes is None or len(bench_closes) <= n: return 0.0
+    if bench_closes[-1-n] <= 0: return 0.0
+    return bench_closes[-1] / bench_closes[-1-n] - 1
+
+def calc_rs5(ohlc_map, bench_closes=None):
+    """
+    RS5: 5-gün ham getiri bazlı percentile (1-99). Kısa vadeli momentum.
+    Benchmark-relative DEĞİL — bütün hisseleri ham 5-gün getirisine göre sıralar.
+    Yeni arz hisseler de hesaba katılır (sadece 6+ günlük veri gerekir).
+    """
     raw = {}
     for t, ohlc in ohlc_map.items():
         if not ohlc or len(ohlc) < 6: continue
@@ -611,8 +621,12 @@ def calc_rs5(ohlc_map):
             raw[t] = (c[-1] / c[-6] - 1)
     return percentile_rank(raw)
 
-def calc_rs21(ohlc_map):
-    """RS21: 21-gün getiri bazlı percentile."""
+def calc_rs21(ohlc_map, bench_closes=None):
+    """
+    RS21: 21-gün ham getiri bazlı percentile (1-99). Orta vadeli momentum.
+    Benchmark-relative DEĞİL — saf 21-gün getirisi sıralaması.
+    Yeni arz hisseler de katılır (22+ günlük veri yeterli).
+    """
     raw = {}
     for t, ohlc in ohlc_map.items():
         if not ohlc or len(ohlc) < 22: continue
@@ -621,18 +635,47 @@ def calc_rs21(ohlc_map):
             raw[t] = (c[-1] / c[-22] - 1)
     return percentile_rank(raw)
 
-def calc_rsms(ohlc_map):
-    """RS-MS (MarketSmith): 3A×40% + 6A×20% + 9A×20% + 12A×20%."""
+def calc_rsms(ohlc_map, bench_closes):
+    """
+    RS-MS (MarketSmith / IBD tarzı): hisse-vs-SPY excess return ağırlıklı:
+      3A×40% + 6A×20% + 9A×20% + 12A×20%
+    Bu uzun vadeli "true leader" sinyalidir.
+
+    Minimum veri şartı: 6 ay (127+ gün).
+    3-6 ay arası veri olan ticker'lar (yeni arzlar) RS-MS'e dahil edilmez
+    → UI'da dict'te olmadığı için `-` / `null` olarak görünür.
+    Bu doğru davranış: 3 aylık IPO bir leader olarak değerlendirilemez.
+
+    6+ ay verisi olan ama 12 aylık verisi olmayan hisseler için ağırlıklar
+    mevcut bileşenler üzerinde renormalize edilir.
+    """
+    b3  = _bench_return(bench_closes, 63)
+    b6  = _bench_return(bench_closes, 126)
+    b9  = _bench_return(bench_closes, 189)
+    b12 = _bench_return(bench_closes, 252)
     raw = {}
     for t, ohlc in ohlc_map.items():
-        if not ohlc or len(ohlc) < 253: continue
+        # Yeni arz koruması: en az 6 aylık veri şart
+        if not ohlc or len(ohlc) < 127: continue
         c = [r["c"] for r in ohlc]
         try:
-            r3  = c[-1] / c[-64]  - 1
-            r6  = c[-1] / c[-127] - 1
-            r9  = c[-1] / c[-190] - 1
-            r12 = c[-1] / c[-253] - 1
-            raw[t] = r3*0.4 + r6*0.2 + r9*0.2 + r12*0.2
+            comps = []        # (excess_return, ağırlık)
+            # 3m (her zaman var, çünkü 6+ ay var)
+            if c[-64] > 0:
+                comps.append((c[-1]/c[-64] - 1 - b3, 0.4))
+            # 6m (her zaman var)
+            if c[-127] > 0:
+                comps.append((c[-1]/c[-127] - 1 - b6, 0.2))
+            # 9m (varsa)
+            if len(c) > 189 and c[-190] > 0:
+                comps.append((c[-1]/c[-190] - 1 - b9, 0.2))
+            # 12m (varsa)
+            if len(c) > 252 and c[-253] > 0:
+                comps.append((c[-1]/c[-253] - 1 - b12, 0.2))
+            if len(comps) >= 2:  # en az 3m + 6m
+                # Mevcut bileşenlerin ağırlıklarını renormalize et
+                total_w = sum(w for _, w in comps)
+                raw[t] = sum(r*w for r, w in comps) / total_w
         except Exception:
             pass
     return percentile_rank(raw)
@@ -800,7 +843,7 @@ tr.sr{cursor:pointer}tr.sr:hover{background:rgba(99,102,241,.06)}
 <div style="overflow-x:auto"><table id="hisseTbl"></table></div></div>
 </div>
 <div id="hisseChartWrap" style="display:none">
-<div style="margin-bottom:10px"><button class="btn" id="cloudFilterBtn" onclick="toggleCloudFilter()">☁️ In Cloud</button><button class="btn" id="atrFilterBtn" onclick="toggleAtrFilter()" style="margin-left:5px">📏 Within 1 ATR of EMA</button><button class="btn" id="rs85FilterBtn" onclick="toggleRs85Filter()" style="margin-left:5px">⚡ RS 85+</button><span id="cloudFilterInfo" style="font-size:10px;color:rgba(255,255,255,.3);font-family:monospace;margin-left:8px"></span><button class="btn" onclick="exportTvList()" style="margin-left:12px;border-color:rgba(99,102,241,.3);color:rgba(165,180,252,.7)">📋 TV List</button></div>
+<div style="margin-bottom:10px"><button class="btn" id="cloudFilterBtn" onclick="toggleCloudFilter()">☁️ In Cloud</button><button class="btn" id="atrFilterBtn" onclick="toggleAtrFilter()" style="margin-left:5px">📏 Within 1 ATR of EMA</button><button class="btn" id="rs85FilterBtn" onclick="toggleRs85Filter()" style="margin-left:5px" title="RS21 ≥ 85: short/medium-term momentum (21-day return percentile, not benchmark-relative)">⚡ RS 85+</button><button class="btn" id="ms85FilterBtn" onclick="toggleMs85Filter()" style="margin-left:5px" title="RS-MS ≥ 85: long-term leaders (MarketSmith-style, excess vs SPY, weighted 3M/6M/9M/12M). Newly IPO'd stocks (< 6mo) are excluded.">🏆 MS 85+</button><span id="cloudFilterInfo" style="font-size:10px;color:rgba(255,255,255,.3);font-family:monospace;margin-left:8px"></span><button class="btn" onclick="exportTvList()" style="margin-left:12px;border-color:rgba(99,102,241,.3);color:rgba(165,180,252,.7)">📋 TV List</button></div>
 <div class="chart-grid" id="hisseChartGrid"></div>
 </div>
 </div>
@@ -819,7 +862,7 @@ tr.sr{cursor:pointer}tr.sr:hover{background:rgba(99,102,241,.06)}
 <script>
 const R=__DATA__;
 let curP='1m',curSec=null,sC=-1,sA=false,barSort='perf',curView='table';
-let hisseP='1m',hisseSC=-1,hisseSA=false,hisseViewMode='table',cloudFilter=false,atrFilter=false,rs85Filter=false;
+let hisseP='1m',hisseSC=-1,hisseSA=false,hisseViewMode='table',cloudFilter=false,atrFilter=false,rs85Filter=false,ms85Filter=false;
 const miniCharts=[];
 // ===== MAIN TAB SWITCHING =====
 function switchMain(panel,btn){
@@ -835,7 +878,7 @@ document.getElementById('tableView').style.display=v==='table'?'block':'none';
 document.getElementById('chartView').style.display=v==='charts'?'block':'none';
 if(v==='charts'&&curSec)renderChartGrid()}
 function destroyMiniCharts(){miniCharts.forEach(c=>c.destroy());miniCharts.length=0}
-const rT={rs5:'RS5: 5-day return percentile rank (1-99). Short-term momentum.',rs21:'RS21: 21-day return percentile rank (1-99). Medium-term momentum.',rsms:'RS-MS (MarketSmith): (3M return×40% + 6M×20% + 9M×20% + 12M×20%) percentile rank (1-99). Long-term relative strength.'};
+const rT={rs5:'RS5: 5-day raw return percentile rank (1-99). Short-term momentum, NOT benchmark-relative.',rs21:'RS21: 21-day raw return percentile rank (1-99). Medium-term momentum, NOT benchmark-relative. Picks up short-term winners regardless of long-term trend.',rsms:'RS-MS (MarketSmith / IBD-style): Excess return vs SPY weighted (3M x 40% + 6M x 20% + 9M x 20% + 12M x 20%), percentile rank (1-99). Long-term relative strength. Newly IPOd stocks (< 6 months data) are excluded.'};
 function sT(id,b){document.querySelectorAll('.tc').forEach(t=>t.classList.remove('a'));document.querySelectorAll('#mt .tab').forEach(t=>t.classList.remove('a'));document.getElementById('tab-'+id).classList.add('a');if(b)b.classList.add('a')}
 function sP(p,b){curP=p;document.querySelectorAll('#gp .btn').forEach(x=>x.classList.remove('a'));if(b)b.classList.add('a');sC=-1;barSort='perf';render()}
 function pC(v){if(v==null)return'rgba(255,255,255,.08)';if(v>0)return v>8?'rgba(22,163,74,0.9)':v>4?'rgba(34,197,94,0.7)':v>2?'rgba(74,222,128,0.55)':'rgba(74,222,128,0.35)';return v<-8?'rgba(185,28,28,0.9)':v<-4?'rgba(220,38,38,0.7)':v<-2?'rgba(248,113,113,0.55)':'rgba(248,113,113,0.35)'}
@@ -843,6 +886,10 @@ function vF(v){if(v==null)return'-';return(v>0?'+':'')+v.toFixed(2)+'%'}
 function vK(v){return v>0?'sp':v<0?'sn':''}
 function rC(rs){if(rs==null)return['rgba(255,255,255,.08)','rgba(255,255,255,.5)'];if(rs>=80)return['rgba(22,163,74,0.3)','#4ade80'];if(rs>=60)return['rgba(74,222,128,0.15)','#4ade80'];if(rs>=40)return['rgba(255,255,255,.06)','rgba(255,255,255,.5)'];if(rs>=20)return['rgba(248,113,113,0.15)','#f87171'];return['rgba(185,28,28,0.3)','#f87171']}
 function rB(v){const[bg,c]=rC(v);return'<span class="rb" style="background:'+bg+';color:'+c+'">'+(v||'-')+'</span>'}
+// RS/MS rakam rengi: 90-99 açık yeşil, 85-89 gök mavisi, 85 altı turuncu
+function rsColor(v){if(typeof v!=='number')return'rgba(255,255,255,.4)';if(v>=90)return'#4ade80';if(v>=85)return'#38bdf8';return'#fb923c'}
+// Sektör sırası rengi: 1-5 açık yeşil, 6-10 gök mavisi, 11+ turuncu
+function rankColor(r){if(typeof r!=='number')return'#fb923c';if(r<=5)return'#4ade80';if(r<=10)return'#38bdf8';return'#fb923c'}
 function sortBar(k){barSort=k;renderBars()}
 function renderIdx(){const bar=document.getElementById('idxBar');let h='';
 ['SPY','QQQ','IWM'].forEach(n=>{const p=R.idx_perf[n];if(!p)return;const v=p[curP];const c=v!=null?(v>0?'#4ade80':'#f87171'):'rgba(255,255,255,.4)';
@@ -995,14 +1042,25 @@ const sorted=[...tks].sort((a,b)=>{const va=getSortVal(a),vb=getSortVal(b);
 if(typeof va==='string'&&sC>=0&&sA)return va.localeCompare(vb);
 if(typeof va==='string')return vb.localeCompare?vb.localeCompare(va):0;
 return sC>=0&&sA?va-vb:vb-va});
-const rss=R.stock_rs21;
+// Dinamik sektör sıralaması (curP periyoda göre)
+const sortedSecs=Object.keys(R.sector_perf).sort((a,b)=>{
+const va=R.sector_perf[a][curP],vb=R.sector_perf[b][curP];
+if(va==null)return 1;if(vb==null)return -1;return vb-va});
+const secRank={};sortedSecs.forEach((s,i)=>{secRank[s]=i+1});
 let h='';
 sorted.forEach((t,idx)=>{
 const p=R.stock_perf[t];const chg=p?p[curP]:null;
 const chgC=chg!=null?(chg>0?'#4ade80':'#f87171'):'rgba(255,255,255,.4)';
-const rs=rss[t]||'-';
-const rsC=typeof rs==='number'&&rs>=80?'#4ade80':'#f87171';
-h+='<div class="mini-chart" onclick="showFin(\''+t+'\')"><div class="mc-hd"><span class="mc-name">'+t+' <span style="font-size:11px;font-weight:700;color:'+rsC+'">RS:'+rs+'</span></span><span class="mc-chg" style="color:'+chgC+'">'+vF(chg)+'</span></div><canvas id="mc_'+idx+'"></canvas></div>'});
+const rs=R.stock_rs21[t];
+const ms=R.stock_rsms[t];
+const rsTxt=(typeof rs==='number')?rs:'-';
+const msTxt=(typeof ms==='number')?ms:'-';
+const rsC=rsColor(rs);
+const msC=rsColor(ms);
+const sec=R.sector_map[t]||'';
+const rank=secRank[sec];
+const rankTxt=rank?'<span style="font-size:10px;font-weight:700;color:'+rankColor(rank)+'" title="Sector rank by '+curP+' performance">#'+rank+'</span> ':'';
+h+='<div class="mini-chart" onclick="showFin(\''+t+'\')"><div class="mc-hd"><span class="mc-name">'+t+' '+rankTxt+'<span style="font-size:8px;font-weight:400;color:rgba(255,255,255,.3)">'+sec+'</span> <span style="font-size:10px;font-weight:700;color:'+rsC+'" title="RS21">RS:'+rsTxt+'</span> <span style="font-size:10px;font-weight:700;color:'+msC+'" title="RS-MS">MS:'+msTxt+'</span></span><span class="mc-chg" style="color:'+chgC+'">'+vF(chg)+'</span></div><canvas id="mc_'+idx+'"></canvas></div>'});
 grid.innerHTML=h;
 sorted.forEach((t,idx)=>{
 const ohlc=(R.ohlc||{})[t];
@@ -1043,6 +1101,10 @@ renderHisse()}
 function toggleRs85Filter(){rs85Filter=!rs85Filter;
 const btn=document.getElementById('rs85FilterBtn');
 btn.classList.toggle('a',rs85Filter);
+renderHisse()}
+function toggleMs85Filter(){ms85Filter=!ms85Filter;
+const btn=document.getElementById('ms85FilterBtn');
+btn.classList.toggle('a',ms85Filter);
 renderHisse()}
 // ===== HİSSE =====
 function setHisseView(v,btn){hisseViewMode=v;document.querySelectorAll('#hisseTabs .tab').forEach(b=>b.classList.remove('a'));if(btn)btn.classList.add('a');
@@ -1088,7 +1150,8 @@ let filtered=tks;
 if(cloudFilter){filtered=filtered.filter(t=>isInCloud(t))}
 if(atrFilter){filtered=filtered.filter(t=>isNearEma(t))}
 if(rs85Filter){filtered=filtered.filter(t=>{const rs=R.stock_rs21[t];return typeof rs==='number'&&rs>=85})}
-if(cloudFilter||atrFilter||rs85Filter){info.textContent=filtered.length+'/'+tks.length+' stocks'}
+if(ms85Filter){filtered=filtered.filter(t=>{const rs=R.stock_rsms[t];return typeof rs==='number'&&rs>=85})}
+if(cloudFilter||atrFilter||rs85Filter||ms85Filter){info.textContent=filtered.length+'/'+tks.length+' stocks'}
 else{info.textContent=''}
 const rows=filtered.map(t=>({t,p:R.stock_perf[t]}));
 if(hisseSC>=0){
@@ -1101,15 +1164,25 @@ rows.sort((a,b)=>{const va=getVal(a.t),vb=getVal(b.t);
 if(typeof va==='string')return hisseSA?va.localeCompare(vb):vb.localeCompare(va);
 return hisseSA?va-vb:vb-va})}
 else{rows.sort((a,b)=>{const va=a.p?a.p[hisseP]||0:0;const vb=b.p?b.p[hisseP]||0:0;return vb-va})}
-const rss=R.stock_rs21;
+// Dinamik sektör sıralaması — kullanıcının seçtiği periyoda göre
+const sortedSecs=Object.keys(R.sector_perf).sort((a,b)=>{
+const va=R.sector_perf[a][hisseP],vb=R.sector_perf[b][hisseP];
+if(va==null)return 1;if(vb==null)return -1;return vb-va});
+const secRank={};sortedSecs.forEach((s,i)=>{secRank[s]=i+1});
 let h='';
 rows.forEach(({t},idx)=>{
 const p=R.stock_perf[t];const chg=p?p[hisseP]:null;
 const chgC=chg!=null?(chg>0?'#4ade80':'#f87171'):'rgba(255,255,255,.4)';
-const rs=rss[t]||'-';
-const rsC=typeof rs==='number'&&rs>=80?'#4ade80':'#f87171';
+const rs=R.stock_rs21[t];
+const ms=R.stock_rsms[t];
+const rsTxt=(typeof rs==='number')?rs:'-';
+const msTxt=(typeof ms==='number')?ms:'-';
+const rsC=rsColor(rs);
+const msC=rsColor(ms);
 const sec=R.sector_map[t]||'';
-h+='<div class="mini-chart" onclick="showFin(\''+t+'\')"><div class="mc-hd"><span class="mc-name">'+t+' <span style="font-size:9px;font-weight:400;color:rgba(255,255,255,.3)">'+sec+'</span> <span style="font-size:11px;font-weight:700;color:'+rsC+'">RS:'+rs+'</span></span><span class="mc-chg" style="color:'+chgC+'">'+vF(chg)+'</span></div><canvas id="hmc_'+idx+'"></canvas></div>'});
+const rank=secRank[sec];
+const rankTxt=rank?'<span style="font-size:10px;font-weight:700;color:'+rankColor(rank)+'" title="Sector rank by '+hisseP+' performance">#'+rank+'</span> ':'';
+h+='<div class="mini-chart" onclick="showFin(\''+t+'\')"><div class="mc-hd"><span class="mc-name">'+t+' '+rankTxt+'<span style="font-size:8px;font-weight:400;color:rgba(255,255,255,.3)">'+sec+'</span> <span style="font-size:10px;font-weight:700;color:'+rsC+'" title="RS21">RS:'+rsTxt+'</span> <span style="font-size:10px;font-weight:700;color:'+msC+'" title="RS-MS">MS:'+msTxt+'</span></span><span class="mc-chg" style="color:'+chgC+'">'+vF(chg)+'</span></div><canvas id="hmc_'+idx+'"></canvas></div>'});
 grid.innerHTML=h;
 requestAnimationFrame(()=>{
 rows.forEach(({t},idx)=>{
@@ -1123,6 +1196,7 @@ let filtered=tks;
 if(cloudFilter){filtered=filtered.filter(t=>isInCloud(t))}
 if(atrFilter){filtered=filtered.filter(t=>isNearEma(t))}
 if(rs85Filter){filtered=filtered.filter(t=>{const rs=R.stock_rs21[t];return typeof rs==='number'&&rs>=85})}
+if(ms85Filter){filtered=filtered.filter(t=>{const rs=R.stock_rsms[t];return typeof rs==='number'&&rs>=85})}
 const rows=filtered.map(t=>({t,p:R.stock_perf[t]}));
 if(hisseSC>=0){
 const getVal=(t)=>{
@@ -1207,15 +1281,19 @@ def main():
     # Hisse perf'inden benchmark'ları çıkar (stock_perf'e karışmasınlar)
     stock_perf = {t: p for t, p in perf_map.items() if t not in BENCHMARKS}
 
-    # 6) RS
-    log("RS skorları (RS5/RS21/RS-MS)...")
+    # 6) RS — RS5/RS21 ham getiri (kısa-orta momentum), RS-MS excess vs SPY (uzun vadeli leader)
+    log("RS skorları (RS5/RS21 ham, RS-MS excess vs SPY)...")
     stock_ohlc = {t: ohlc_cache[t] for t in stock_perf}
-    stock_rs5  = calc_rs5(stock_ohlc)
-    stock_rs21 = calc_rs21(stock_ohlc)
-    stock_rsms = calc_rsms(stock_ohlc)
+    spy_recs = ohlc_cache.get("SPY", [])
+    spy_closes = [r["c"] for r in spy_recs] if spy_recs else None
+    if not spy_closes:
+        log("  ⚠️  SPY verisi yok — RS-MS hesabı düz getiri ile yapılacak (benchmark=0)")
+    stock_rs5  = calc_rs5 (stock_ohlc, spy_closes)
+    stock_rs21 = calc_rs21(stock_ohlc, spy_closes)
+    stock_rsms = calc_rsms(stock_ohlc, spy_closes)
     log(f"  RS5  : {len(stock_rs5)}")
     log(f"  RS21 : {len(stock_rs21)}")
-    log(f"  RS-MS: {len(stock_rsms)}")
+    log(f"  RS-MS: {len(stock_rsms)}  (newly IPO'd <6mo excluded by design)")
 
     # 7) Sektörler
     log("Sektör aggregate...")
