@@ -3,7 +3,6 @@ name: US Sector Dashboard Update
 on:
   schedule:
     # TR 07:23 (UTC 04:23) - Pazartesi-Cumartesi
-    # Tam saatlerden kaçınıyoruz
     - cron: '23 4 * * 1-6'
   workflow_dispatch:
 
@@ -32,10 +31,15 @@ jobs:
         run: python us_sector_dashboard.py
         continue-on-error: true
 
-      - name: Commit and push updated dashboard
+      - name: Run sector_rotation_dashboard
+        working-directory: ./sector_rotation_dashboard
+        run: python sector_rotation_dashboard.py
+        continue-on-error: true
+
+      - name: Commit and push updated dashboards
         run: |
           git config user.name "GitHub Actions Bot"
           git config user.email "actions@github.com"
           git add -A
-          git diff --staged --quiet || git commit -m "Auto-update US dashboard [$(date +'%Y-%m-%d %H:%M')]"
+          git diff --staged --quiet || git commit -m "Auto-update US dashboards [$(date +'%Y-%m-%d %H:%M')]"
           git push
