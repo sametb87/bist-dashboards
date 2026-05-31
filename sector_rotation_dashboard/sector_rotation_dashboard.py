@@ -301,8 +301,16 @@ def compute_rrg(sector_data, bench_close, tail=RRG_TAIL):
             quad = "Lagging"
         else:
             quad = "Improving"
+        # RRG skoru: güncel konum (sağ-üst iyi) + kuyruk yönü (sağ-yukarı iyi)
+        first = pts[0]
+        pos = (last["x"] - 100) + (last["y"] - 100)          # konum: ne kadar lider
+        head = (last["x"] - first["x"]) + (last["y"] - first["y"])  # yön: nereye gidiyor
+        rrg_score = round(pos + 1.5 * head, 2)               # yöne biraz daha ağırlık
         out[sector] = {"ticker": SECTOR_ETFS[sector], "points": pts,
-                       "quadrant": quad, "color": palette[idx % len(palette)]}
+                       "quadrant": quad, "color": palette[idx % len(palette)],
+                       "score": rrg_score,
+                       "dx": round(last["x"] - first["x"], 2),
+                       "dy": round(last["y"] - first["y"], 2)}
     return out
 
 
@@ -317,37 +325,105 @@ def rs_roc(close, bench_close, n):
     return round((a / b - 1.0) * 100.0, 2)
 
 
-def rs_cross_flag(close, bench_close, fast=5, slow=20):
-    """Kısa RS-momentum uzun RS-momentum'u yukarı kesti mi (son ~3 gün)? Erken giriş."""
-    rs = rs_line(close, bench_close)
-    if rs is None or len(rs) < slow + 4:
-        return False
-    f = rs.pct_change(fast)
-    s = rs.pct_change(slow)
-    diff = (f - s).dropna()
-    if len(diff) < 4:
-        return False
-    # son barda pozitif, 3 bar önce negatif -> taze yukarı kesişim
-    return bool(diff.iloc[-1] > 0 and diff.iloc[-4] <= 0)
+def fresh_cross_10_21(df, span_fast=10, span_slow=21, window=5):
+    """
+    10MA (SMA) 21EMA'yı son `window` gün içinde yukarı kesti mi?
+    Dönen: (fresh: bool|None, days_since: int|None)  days_since=0 -> bugün kesti
+    """
+    c = df["Close"]
+    if len(c) < span_slow + window + 2:
+        return None, None
+    ma10 = c.rolling(span_fast).mean()
+    ema21 = c.ewm(span=span_slow, adjust=False).mean()
+    diff = (ma10 - ema21).dropna()
+    if len(diff) < window + 2:
+        return None, None
+    sign = diff > 0
+    # son `window` bar içinde False->True geçişi ara
+    for k in range(1, window + 1):
+        if k + 1 > len(sign):
+            break
+        if bool(sign.iloc[-k]) and not bool(sign.iloc[-k - 1]):
+            return True, k - 1   # k=1 -> bugün kesti (days_since 0)
+    # window içinde hiç taze kesişim yok
+    return False, None
 
 
-def rs_new_high_flag(close, bench_close, lookback=20):
-    """RS çizgisi son `lookback` günün zirvesini bugün kırdı mı? RS breakout."""
-    rs = rs_line(close, bench_close)
-    if rs is None or len(rs) < lookback + 1:
-        return False
-    window = rs.iloc[-(lookback + 1):]
-    return bool(window.iloc[-1] >= window.iloc[:-1].max())
+def ext_atr(df, span=21, atr_n=14):
+    """(close - EMA21) / ATR  -> extension, ATR cinsinden. Pozitif=EMA üstünde."""
+    c = df["Close"]
+    if len(df) < max(span, atr_n) + 2:
+        return None
+    e = c.ewm(span=span, adjust=False).mean().iloc[-1]
+    h, l, pc = df["High"], df["Low"], c.shift(1)
+    tr = pd.concat([(h - l), (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(atr_n).mean().iloc[-1]
+    last = c.iloc[-1]
+    if pd.isna(e) or pd.isna(atr) or atr == 0:
+        return None
+    return round((last - e) / atr, 2)
 
 
-def early_score(roc1, roc3, roc5, cross, newhigh):
-    """Erken rotasyon bileşik skoru: kısa RS-ROC ağırlıklı + bayrak bonusları."""
-    s = 0.0
-    if roc5 is not None: s += 0.30 * roc5
-    if roc3 is not None: s += 0.40 * roc3
-    if roc1 is not None: s += 0.30 * roc1
-    if cross:   s += 1.5   # taze kesişim bonusu
-    if newhigh: s += 1.5   # RS yeni zirve bonusu
+def parabolic_score(df, n=20):
+    """
+    Son n günün ne kadar tek-yönlü/dik geldiği (0..1). 1=parabolik geliş.
+    Net yer değişiminin, gün gün toplam yol uzunluğuna oranı (yön tutarlılığı)
+    ile son yarının ivmesini birleştirir. Yüksek = parabolik, anti-baz.
+    """
+    c = df["Close"].tail(n + 1)
+    if len(c) < n + 1:
+        return None
+    rets = c.pct_change().dropna()
+    if len(rets) < 4:
+        return None
+    net = abs(c.iloc[-1] / c.iloc[0] - 1.0)
+    path = rets.abs().sum()
+    if path == 0:
+        return None
+    directionality = min(net / path, 1.0)          # 0=testere, 1=düz tek yön
+    # son yarı, ilk yarıdan ne kadar hızlı (ivmelenme = parabolik işareti)
+    half = len(rets) // 2
+    first = rets.iloc[:half].mean()
+    second = rets.iloc[half:].mean()
+    accel = 0.0
+    if first is not None and not pd.isna(first) and not pd.isna(second):
+        if second > 0 and second > abs(first) * 1.5:
+            accel = min((second - max(first, 0)) / (abs(second) + 1e-9), 1.0)
+    return round(min(0.6 * directionality + 0.4 * max(accel, 0), 1.0), 2)
+
+
+def early_score(fresh, ext, ivme, parab,
+                ext_pen_start=3.0, ext_kill=6.0, parab_kill=0.85):
+    """
+    Konsolidasyon/dip kırması odaklı erken rotasyon skoru.
+    KAPILAR (herhangi biri -> 0):
+      - taze 10MA×21EMA kesişimi yok
+      - extension >= ext_kill ATR (exhaustion)
+      - parabolik >= parab_kill
+      - RS ivmesi negatif (zayıf tema)
+    İÇERİDE:
+      taban 5.0 + RS ivmesi
+      - extension cezası: ext_pen_start ATR üstü her ATR için -1.5
+      + EMA'ya çok yakınsa (<=1.5 ATR, taze çıkış) +1.0
+      - parabolik yumuşak ceza: -3.0 * parab
+    """
+    if fresh is not True:
+        return 0.0
+    if ext is not None and ext >= ext_kill:
+        return 0.0
+    if parab is not None and parab >= parab_kill:
+        return 0.0
+    if ivme is not None and ivme < 0:   # zayıf tema istemiyoruz: RS hızlanması negatifse ele
+        return 0.0
+    s = 5.0
+    if ivme is not None:
+        s += ivme
+    if ext is not None and ext > ext_pen_start:
+        s -= 1.5 * (ext - ext_pen_start)
+    if ext is not None and ext <= 1.5:
+        s += 1.0
+    if parab is not None:
+        s -= 3.0 * parab
     return round(s, 2)
 
 
@@ -368,12 +444,15 @@ def build_theme_rows(data, bench_close):
                 v = rs.get(k)
                 if v is not None:
                     score += w * v
-            # erken rotasyon metrikleri (kısa pencere RS hızlanması)
-            roc1 = rs_roc(close, bench_close, 1)
-            roc3 = rs_roc(close, bench_close, 3)
+            # ---- erken rotasyon: 10MA×21EMA taze kesişim + extension + anti-parabolik ----
             roc5 = rs_roc(close, bench_close, 5)
-            cross = rs_cross_flag(close, bench_close)
-            newhigh = rs_new_high_flag(close, bench_close)
+            roc20 = rs_roc(close, bench_close, 20)
+            ivme = (round(roc5 - roc20 * 0.25, 2)
+                    if (roc5 is not None and roc20 is not None) else None)
+            fresh, days_since = fresh_cross_10_21(df)
+            ext = ext_atr(df)
+            parab = parabolic_score(df)
+            escore = early_score(fresh, ext, ivme, parab)
             rows.append({
                 "sector": sector,
                 "theme": theme,
@@ -384,9 +463,12 @@ def build_theme_rows(data, bench_close):
                 "atr": atr_pct(df),
                 "score": round(score, 2),
                 "early": {
-                    "roc1": roc1, "roc3": roc3, "roc5": roc5,
-                    "cross": cross, "newhigh": newhigh,
-                    "score": early_score(roc1, roc3, roc5, cross, newhigh),
+                    "ivme": ivme,
+                    "fresh": fresh,
+                    "days_since": days_since,
+                    "ext": ext,
+                    "parab": parab,
+                    "score": escore,
                 },
             })
     rows.sort(key=lambda r: r["score"], reverse=True)
@@ -481,8 +563,13 @@ def build_html(rrg, theme_rows, charts, holdings, meta):
   @media(max-width:900px){.grid2{grid-template-columns:1fr;}}
   .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;}
   .card h3{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:500;}
-  #rrg-wrap{position:relative;}
-  #rrg{width:100%;height:560px;display:block;background:var(--panel);border-radius:8px;}
+  #rrg-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
+  @media(max-width:1100px){#rrg-grid{grid-template-columns:repeat(3,1fr);}}
+  @media(max-width:760px){#rrg-grid{grid-template-columns:repeat(2,1fr);}}
+  .rrg-cell{background:#0e1117;border:1px solid var(--border);border-radius:6px;padding:6px;}
+  .rrg-cell .lbl{display:flex;justify-content:space-between;align-items:center;font-size:11px;margin-bottom:2px;}
+  .rrg-cell .lbl b{font-size:12px;}
+  .rrg-cell canvas{width:100%;height:130px;display:block;}
   .legend{display:flex;gap:16px;font-size:12px;margin-top:8px;flex-wrap:wrap;color:var(--muted);}
   .legend b{font-weight:600;}
   .lead{color:#26a69a;} .impr{color:#58a6ff;} .weak{color:#d29922;} .lag{color:#ef5350;}
@@ -512,10 +599,14 @@ def build_html(rrg, theme_rows, charts, holdings, meta):
 
 <div class="view active" id="v-rrg">
   <div class="card">
-    <h3>Makro sektör rotasyonu — RS-Ratio (x) / RS-Momentum (y), son 8 hafta izi</h3>
-    <div id="rrg-wrap"><canvas id="rrg"></canvas></div>
-    <div class="legend" id="rrg-legend"></div>
-    <div class="note">Her ETF kendi sabit rengiyle çizilir; kuyruk son 8 haftadır, büyük uç = güncel hafta. Tipik rotasyon saat yönünde: Improving→Leading→Weakening→Lagging. Kuyruğun yönü o sektöre paranın girdiğini (yukarı-sağa) ya da çıktığını (aşağı-sola) gösterir.</div>
+    <h3>Makro sektör rotasyonu — her sektör kendi mini RRG'sinde (son 8 hafta izi)</h3>
+    <div id="rrg-grid"></div>
+    <div class="note">Her kutuda merkez = SPY. Kuyruk eskiden (soluk) güncele (parlak büyük nokta) gider. Sağ-üst (Leading) = güçlü & ivmeli; sol-alt (Lagging) = zayıf. Kuyruk sağa-yukarı kıvrılıyorsa para giriyor, sola-aşağı dönüyorsa çıkıyor.</div>
+  </div>
+  <div class="card" style="margin-top:16px;">
+    <h3>RRG skoru sıralaması — para nereye akıyor</h3>
+    <table id="rrg-table"></table>
+    <div class="note">RRG Skoru = güncel konum (lider mi) + 1.5×kuyruk yönü (nereye gidiyor). Pozitif & yüksek = güç kazanan sektör; negatif = güç kaybeden. Δx = RS-Ratio değişimi (sağa = güçleniyor), Δy = RS-Momentum değişimi (yukarı = ivmeleniyor).</div>
   </div>
 </div>
 
@@ -557,16 +648,17 @@ def build_html(rrg, theme_rows, charts, holdings, meta):
 
 <div class="view" id="v-early">
   <div class="card">
-    <h3>Erken rotasyon taraması — kısa pencere RS hızlanması (1G/3G/5G RS-ROC)</h3>
+    <h3>Erken rotasyon taraması — konsolidasyon/dip kırması (extended ve parabolik elenir)</h3>
     <div style="max-height:72vh;overflow:auto;">
       <table id="early-table"></table>
     </div>
   </div>
   <div class="note">
-    <b>RS-ROC</b> = RS çizgisinin (ETF/SPY) o penceredeki % değişimi; pozitif = SPY'dan hızlı.
-    <b>✚ Cross</b> = kısa RS-momentum uzun RS-momentum'u son günlerde yukarı kesti (taze giriş).
-    <b>▲ RS-NH</b> = RS çizgisi son 20 günün zirvesini bugün kırdı (RS breakout).
-    <b>Erken skor</b> = 5G×0.30 + 3G×0.40 + 1G×0.30 + bayrak bonusları. Üsttekiler = paranın yeni yeni döndüğü temalar, fiyat breakout'undan önce.
+    <b>10×21 Kesişim</b> = 10MA, 21EMA'yı son 5 günde yukarı kesti mi (taze trend dönüşü). <b>Taze kesişim yoksa skor 0</b> — extended temada kesişim haftalar önce olduğu için elenir.
+    <b>Ext (ATR)</b> = (kapanış − EMA21)/ATR, yani fiyat 21EMA'dan kaç ATR uzakta. 3 ATR üstü ceza (sarı), <b>6+ ATR exhaustion → skor 0</b> (kırmızı). EMA'ya yakın (≤1.5) = taze çıkış, ödül.
+    <b>Parabolik</b> = son 20 günün ne kadar dik/tek-yönlü geldiği (0–1). Yüksek = baz yok, dikey geliş. <b>0.85+ → skor 0</b> (exhaustion rally elenir).
+    <b>RS İvme</b> = RS_5G − RS_20G×0.25, destekleyici yön teyidi.
+    <b>Erken Skor</b> = taze kesişimli + EMA'ya yakın + bazdan çıkan + RS hızlanan temaları öne koyar. Üç kapıdan (kesişim yok / aşırı extended / parabolik) birine takılan satırlar 0 ve soluk gösterilir.
   </div>
 </div>
 
@@ -591,59 +683,74 @@ document.querySelectorAll('.tab').forEach(t=>{
 function cls(v){ if(v===null||v===undefined) return 'zero'; return v>0?'pos':(v<0?'neg':'zero'); }
 function fmt(v){ if(v===null||v===undefined) return '–'; return (v>0?'+':'')+v.toFixed(2)+'%'; }
 
-// ================= TAB 1: RRG =================
-function drawRRG(){
-  const cv=document.getElementById('rrg');
-  const wrap=document.getElementById('rrg-wrap');
-  const W=wrap.clientWidth, H=560, dpr=window.devicePixelRatio||1;
-  cv.width=W*dpr; cv.height=H*dpr; cv.style.width=W+'px'; cv.style.height=H+'px';
-  const ctx=cv.getContext('2d'); ctx.scale(dpr,dpr); ctx.clearRect(0,0,W,H);
-  const sectors=DATA.rrg;
-  let xs=[],ys=[];
-  for(const k in sectors) sectors[k].points.forEach(p=>{xs.push(p.x);ys.push(p.y);});
-  if(xs.length===0){ctx.fillStyle='#8b949e';ctx.fillText('RRG verisi yok',20,30);return;}
-  const pad=46;
-  const xmin=Math.min(...xs,98), xmax=Math.max(...xs,102);
-  const ymin=Math.min(...ys,98), ymax=Math.max(...ys,102);
-  const sx=v=>pad+(v-xmin)/(xmax-xmin)*(W-2*pad);
-  const sy=v=>H-pad-(v-ymin)/(ymax-ymin)*(H-2*pad);
-  // kadran arka planları (sabit konum referansı, soluk)
+// ================= TAB 1: RRG (small multiples + skor tablosu) =================
+const QUADCOL={Leading:'#26a69a',Weakening:'#d29922',Lagging:'#ef5350',Improving:'#58a6ff'};
+function drawMiniRRG(canvas, pts, col){
+  const W=canvas.clientWidth||180, H=130, dpr=window.devicePixelRatio||1;
+  canvas.width=W*dpr; canvas.height=H*dpr;
+  const ctx=canvas.getContext('2d'); ctx.scale(dpr,dpr); ctx.clearRect(0,0,W,H);
+  // her mini grafik kendi ölçeğinde; merkez 100 her zaman ortada dursun diye simetrik sınır
+  let mx=2, my=2;
+  pts.forEach(p=>{mx=Math.max(mx,Math.abs(p.x-100));my=Math.max(my,Math.abs(p.y-100));});
+  mx*=1.25; my*=1.25;
+  const pad=8;
+  const sx=v=>pad+((v-100)+mx)/(2*mx)*(W-2*pad);
+  const sy=v=>H-pad-((v-100)+my)/(2*my)*(H-2*pad);
   const cx=sx(100), cy=sy(100);
+  // kadran arka planı
   const fills=[['#26a69a',cx,0,W-cx,cy],['#d29922',cx,cy,W-cx,H-cy],
                ['#ef5350',0,cy,cx,H-cy],['#58a6ff',0,0,cx,cy]];
-  fills.forEach(([c,x,y,w,h])=>{ctx.globalAlpha=.05;ctx.fillStyle=c;ctx.fillRect(x,y,w,h);});
+  fills.forEach(([c,x,y,w,h])=>{ctx.globalAlpha=.07;ctx.fillStyle=c;ctx.fillRect(x,y,w,h);});
   ctx.globalAlpha=1;
-  // 100 eksenleri
   ctx.strokeStyle='#2d333b';ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(cx,0);ctx.lineTo(cx,H);ctx.moveTo(0,cy);ctx.lineTo(W,cy);ctx.stroke();
-  ctx.fillStyle='#6e7681';ctx.font='11px sans-serif';
-  ctx.fillText('Leading',W-pad-54,18);ctx.fillText('Weakening',W-pad-64,H-8);
-  ctx.fillText('Lagging',6,H-8);ctx.fillText('Improving',6,18);
-  // her sektör: KENDİ SABİT RENGİYLE kuyruk + güncel nokta
-  for(const k in sectors){
-    const pts=sectors[k].points, col=sectors[k].color;
-    ctx.strokeStyle=col;ctx.fillStyle=col;ctx.lineWidth=2;ctx.globalAlpha=.85;
-    ctx.beginPath();
-    pts.forEach((p,i)=>{const X=sx(p.x),Y=sy(p.y); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
-    ctx.stroke();
-    // kuyruk noktaları küçükten büyüğe (eskiden güncele)
-    pts.slice(0,-1).forEach((p,i)=>{
-      ctx.globalAlpha=.35+.4*(i/pts.length);
-      ctx.beginPath();ctx.arc(sx(p.x),sy(p.y),2.5,0,7);ctx.fill();});
-    const last=pts[pts.length-1];
-    ctx.globalAlpha=1;ctx.beginPath();ctx.arc(sx(last.x),sy(last.y),6.5,0,7);ctx.fill();
-    ctx.strokeStyle='#0e1117';ctx.lineWidth=1.5;ctx.stroke();
-    ctx.fillStyle=col;ctx.font='600 11px sans-serif';
-    ctx.fillText(sectors[k].ticker, sx(last.x)+10, sy(last.y)+4);
-  }
-  ctx.globalAlpha=1;
-  // sektör renk lejantı
-  const leg=document.getElementById('rrg-legend');
-  leg.innerHTML=Object.keys(sectors).map(k=>{
+  // kuyruk
+  ctx.strokeStyle=col;ctx.fillStyle=col;ctx.lineWidth=2;ctx.globalAlpha=.9;
+  ctx.beginPath();
+  pts.forEach((p,i)=>{const X=sx(p.x),Y=sy(p.y); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y);});
+  ctx.stroke();
+  pts.slice(0,-1).forEach((p,i)=>{
+    ctx.globalAlpha=.3+.45*(i/pts.length);
+    ctx.beginPath();ctx.arc(sx(p.x),sy(p.y),2,0,7);ctx.fill();});
+  const last=pts[pts.length-1];
+  ctx.globalAlpha=1;ctx.beginPath();ctx.arc(sx(last.x),sy(last.y),5.5,0,7);ctx.fill();
+  ctx.strokeStyle='#0e1117';ctx.lineWidth=1.5;ctx.stroke();
+}
+function drawRRG(){
+  const grid=document.getElementById('rrg-grid');
+  const sectors=DATA.rrg;
+  const keys=Object.keys(sectors);
+  if(keys.length===0){grid.innerHTML='<div class="note">RRG verisi yok</div>';return;}
+  // skora göre sırala (en güçlü rotasyon önce)
+  keys.sort((a,b)=>(sectors[b].score??-1e9)-(sectors[a].score??-1e9));
+  // hücreleri oluştur
+  grid.innerHTML=keys.map(k=>{
     const s=sectors[k];
-    return `<span style="color:${s.color};"><b>■ ${s.ticker}</b></span>`+
-           `<span class="sector-tag" style="margin-left:2px;">${k} · ${s.quadrant}</span>`;
+    return `<div class="rrg-cell">
+      <div class="lbl"><b style="color:${s.color};">${s.ticker}</b>
+        <span style="color:${QUADCOL[s.quadrant]};font-size:10px;">${s.quadrant}</span></div>
+      <canvas data-sector="${k}"></canvas>
+      <div class="sector-tag" style="font-size:10px;">${k}</div></div>`;
   }).join('');
+  // canvasları çiz
+  grid.querySelectorAll('canvas').forEach(cv=>{
+    const k=cv.dataset.sector; drawMiniRRG(cv, sectors[k].points, sectors[k].color);
+  });
+  // skor tablosu
+  let h='<thead><tr><th class="l">Sektör</th><th class="l">ETF</th>'+
+        '<th>Kadran</th><th>Δx (RS-Ratio)</th><th>Δy (RS-Mom)</th>'+
+        '<th>RRG Skoru</th></tr></thead><tbody>';
+  keys.forEach(k=>{
+    const s=sectors[k];
+    h+=`<tr><td class="l">${k}</td>`+
+       `<td class="l" style="color:${s.color};"><b>${s.ticker}</b></td>`+
+       `<td style="color:${QUADCOL[s.quadrant]};">${s.quadrant}</td>`+
+       `<td class="${cls(s.dx)}">${s.dx>0?'+':''}${s.dx.toFixed(2)}</td>`+
+       `<td class="${cls(s.dy)}">${s.dy>0?'+':''}${s.dy.toFixed(2)}</td>`+
+       `<td class="${cls(s.score)}"><b>${s.score>0?'+':''}${s.score.toFixed(2)}</b></td></tr>`;
+  });
+  h+='</tbody>';
+  document.getElementById('rrg-table').innerHTML=h;
 }
 window.addEventListener('resize',()=>{
   if(document.querySelector('.tab.active').dataset.v==='rrg') drawRRG();
@@ -812,9 +919,9 @@ function renderEarly(){
     let av,bv;
     const k=earlySort.key;
     if(k==='theme'){av=a.theme;bv=b.theme;}
-    else if(k==='roc1'){av=a.early.roc1;bv=b.early.roc1;}
-    else if(k==='roc3'){av=a.early.roc3;bv=b.early.roc3;}
-    else if(k==='roc5'){av=a.early.roc5;bv=b.early.roc5;}
+    else if(k==='ivme'){av=a.early.ivme;bv=b.early.ivme;}
+    else if(k==='ext'){av=a.early.ext;bv=b.early.ext;}
+    else if(k==='parab'){av=a.early.parab;bv=b.early.parab;}
     else {av=a.early.score;bv=b.early.score;}
     av=(av===null||av===undefined)?-1e9:av; bv=(bv===null||bv===undefined)?-1e9:bv;
     if(typeof av==='string') return earlySort.dir*av.localeCompare(bv);
@@ -822,20 +929,42 @@ function renderEarly(){
   });
   let h='<thead><tr>'+
     '<th class="l" data-k="theme">Tema</th><th class="l">ETF</th>'+
-    '<th data-k="roc1">RS 1G</th><th data-k="roc3">RS 3G</th><th data-k="roc5">RS 5G</th>'+
-    '<th>Bayrak</th><th data-k="score">Erken Skor</th></tr></thead><tbody>';
+    '<th>10×21 Kesişim</th><th data-k="ext">Ext (ATR)</th>'+
+    '<th data-k="parab">Parabolik</th><th data-k="ivme">RS İvme</th>'+
+    '<th data-k="score">Erken Skor</th></tr></thead><tbody>';
   rows.forEach(r=>{
     const e=r.early;
-    const flags=(e.cross?'<span style="color:#26a69a;" title="taze RS kesişimi">✚ Cross</span> ':'')+
-                (e.newhigh?'<span style="color:#58a6ff;" title="RS 20g yeni zirve">▲ RS-NH</span>':'');
-    h+=`<tr><td class="l">${r.theme}${r.proxy?'<span class="proxy">proxy</span>':''}`+
+    // taze kesişim hücresi
+    let crossTxt;
+    if(e.fresh===true){
+      const d=e.days_since;
+      crossTxt=`<span style="color:#26a69a;">✚ taze`+(d===0?' (bugün)':(d!=null?` (${d}g önce)`:''))+`</span>`;
+    } else if(e.fresh===false){
+      crossTxt='<span class="zero">– yok</span>';
+    } else crossTxt='<span class="zero">–</span>';
+    // extension hücresi (3 ATR üstü sarı, 6+ kırmızı)
+    let extCls='zero', extStyle='';
+    if(e.ext!==null&&e.ext!==undefined){
+      if(e.ext>=6){extCls='neg';extStyle='background:rgba(239,83,80,.25);';}
+      else if(e.ext>3){extStyle='background:rgba(210,153,34,.20);';}
+      else if(e.ext<=1.5&&e.ext>=-1.5){extCls='pos';}
+    }
+    // parabolik (yüksek = kötü)
+    let parCls='zero',parStyle='';
+    if(e.parab!==null&&e.parab!==undefined){
+      if(e.parab>=0.85){parCls='neg';parStyle='background:rgba(239,83,80,.25);';}
+      else if(e.parab>=0.6){parStyle='background:rgba(210,153,34,.20);';}
+    }
+    const gated = e.score===0;   // bir kapıdan elendi
+    const scoreTxt = e.score===null ? '–' : e.score.toFixed(2);
+    h+=`<tr style="${gated?'opacity:.45;':''}"><td class="l">${r.theme}${r.proxy?'<span class="proxy">proxy</span>':''}`+
        `<div class="sector-tag">${r.sector}</div></td>`+
        `<td class="l tk" data-tk="${r.ticker}">${r.ticker}</td>`+
-       `<td class="${cls(e.roc1)}" style="background:${rocColor(e.roc1)}">${fmt(e.roc1)}</td>`+
-       `<td class="${cls(e.roc3)}" style="background:${rocColor(e.roc3)}">${fmt(e.roc3)}</td>`+
-       `<td class="${cls(e.roc5)}" style="background:${rocColor(e.roc5)}">${fmt(e.roc5)}</td>`+
-       `<td class="l">${flags||'<span class="zero">–</span>'}</td>`+
-       `<td class="${cls(e.score)}"><b>${e.score.toFixed(2)}</b></td></tr>`;
+       `<td class="l">${crossTxt}</td>`+
+       `<td class="${extCls}" style="${extStyle}">${e.ext!==null&&e.ext!==undefined?(e.ext>0?'+':'')+e.ext.toFixed(2):'–'}</td>`+
+       `<td class="${parCls}" style="${parStyle}">${e.parab!==null&&e.parab!==undefined?e.parab.toFixed(2):'–'}</td>`+
+       `<td class="${cls(e.ivme)}">${e.ivme!==null&&e.ivme!==undefined?(e.ivme>0?'+':'')+e.ivme.toFixed(2):'–'}</td>`+
+       `<td class="${cls(e.score)}"><b>${scoreTxt}</b></td></tr>`;
   });
   h+='</tbody>';
   const tbl=document.getElementById('early-table'); tbl.innerHTML=h;
