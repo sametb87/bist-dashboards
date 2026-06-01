@@ -2,11 +2,8 @@ name: US Sector Dashboard Update
 
 on:
   schedule:
-    # TR 00:07 (UTC önceki gün 21:07) - 1. deneme, ABD kapanış sonrası gece
     - cron: '7 21 * * 0-5'
-    # TR 07:23 (UTC 04:23) - 2. deneme, sabah
     - cron: '23 4 * * 1-6'
-    # TR 09:17 (UTC 06:17) - 3. deneme yedek
     - cron: '17 6 * * 1-6'
   workflow_dispatch:
 
@@ -45,5 +42,11 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "actions@github.com"
           git add -A
-          git diff --staged --quiet || git commit -m "Auto-update US dashboards [$(date +'%Y-%m-%d %H:%M')]"
-          git push
+          if ! git diff --staged --quiet; then
+            git commit -m "Auto-update US dashboards [$(date +'%Y-%m-%d %H:%M')]"
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push && break
+              echo "Push attempt $i failed, retrying..."
+              sleep 5
+            done
+          fi
