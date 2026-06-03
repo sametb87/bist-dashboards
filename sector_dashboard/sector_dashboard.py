@@ -61,7 +61,7 @@ def fetch_prices(tickers,period="2y"):
                 prices[t]={d:round(float(c),4) for d,c in zip(h.index.strftime('%Y-%m-%d'),h['Close'])}
                 # Son 80 gün OHLC (mum grafikleri için)
                 recent=h.tail(80)
-                ohlc[t]=[{'d':d,'o':round(float(r['Open']),2),'h':round(float(r['High']),2),'l':round(float(r['Low']),2),'c':round(float(r['Close']),2)} for d,r in zip(recent.index.strftime('%Y-%m-%d'),recent.to_dict('records'))]
+                ohlc[t]=[{'d':d,'o':round(float(r['Open']),2),'h':round(float(r['High']),2),'l':round(float(r['Low']),2),'c':round(float(r['Close']),2)} for d,r in zip(recent.index.strftime('%Y-%m-%d'),recent.to_dict('records')) if not any(isinstance(v,float) and __import__('math').isnan(v) for v in [r['Open'],r['High'],r['Low'],r['Close']])]
             else:errors.append(t)
         except:errors.append(t)
         done[0]+=1
