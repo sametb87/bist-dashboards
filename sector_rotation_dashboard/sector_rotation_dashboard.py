@@ -192,6 +192,8 @@ def download_history(tickers):
             continue
         df = df.rename(columns=str.title)
         df.index = pd.to_datetime(df.index).tz_localize(None)
+        _today = datetime.now().strftime("%Y-%m-%d")
+        df = df[df.index.strftime("%Y-%m-%d") < _today]
         data[t] = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
         time.sleep(0.02)
     print(f"[indir] {len(data)} sembol başarıyla alındı.")
