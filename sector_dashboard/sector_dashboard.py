@@ -58,7 +58,8 @@ def fetch_prices(tickers,period="2y"):
             h=tk.history(period=period)
             if h is not None and len(h)>20:
                 if h.index.tz is not None:h.index=h.index.tz_localize(None)
-                prices[t]={d:round(float(c),4) for d,c in zip(h.index.strftime('%Y-%m-%d'),h['Close'])}
+                if 'Volume' in h.columns:h=h[~((h['Open']==h['High'])&(h['High']==h['Low'])&(h['Low']==h['Close'])&(h['Volume']==0))]
+                prices[t]={d:round(float(c),4) for d,c in zip(h.index.strftime('%Y-%m-%d'),h['Close']) if not (isinstance(c,float) and __import__('math').isnan(c))}
                 # Son 80 gün OHLC (mum grafikleri için)
                 recent=h.tail(80)
                 ohlc[t]=[{'d':d,'o':round(float(r['Open']),2),'h':round(float(r['High']),2),'l':round(float(r['Low']),2),'c':round(float(r['Close']),2)} for d,r in zip(recent.index.strftime('%Y-%m-%d'),recent.to_dict('records')) if not any(isinstance(v,float) and __import__('math').isnan(v) for v in [r['Open'],r['High'],r['Low'],r['Close']])]
@@ -80,7 +81,7 @@ def fetch_indices():
             h=yf.Ticker(sym).history(period="2y")
             if h is not None and len(h)>20:
                 if h.index.tz is not None:h.index=h.index.tz_localize(None)
-                idx[name]={d:round(float(c),2) for d,c in zip(h.index.strftime('%Y-%m-%d'),h['Close'])}
+                idx[name]={d:round(float(c),2) for d,c in zip(h.index.strftime('%Y-%m-%d'),h['Close']) if not (isinstance(c,float) and __import__('math').isnan(c))}
                 print(f"    ✅ {name}: {len(idx[name])} gün")
         except Exception as e:print(f"    ⚠️ {name}: {e}")
     return idx
@@ -341,7 +342,7 @@ tr.sr{cursor:pointer}tr.sr:hover{background:rgba(99,102,241,.06)}
 <div style="overflow-x:auto"><table id="hisseTbl"></table></div></div>
 </div>
 <div id="hisseChartWrap" style="display:none">
-<div style="margin-bottom:10px"><button class="btn" id="cloudFilterBtn" onclick="toggleCloudFilter()">☁️ Cloud İçindekiler</button><button class="btn" id="atrFilterBtn" onclick="toggleAtrFilter()" style="margin-left:5px">📏 EMA'ya 1ATR Yakın</button><button class="btn" id="rs85FilterBtn" onclick="toggleRs85Filter()" style="margin-left:5px">⚡ RS 85+</button><span id="cloudFilterInfo" style="font-size:10px;color:rgba(255,255,255,.3);font-family:monospace;margin-left:8px"></span><button class="btn" onclick="exportTvList()" style="margin-left:12px;border-color:rgba(99,102,241,.3);color:rgba(165,180,252,.7)">📋 TV Liste</button></div>
+<div style="margin-bottom:10px"><button class="btn" id="cloudFilterBtn" onclick="toggleCloudFilter()">☁️ Cloud İçindekiler</button><button class="btn" id="atrFilterBtn" onclick="toggleAtrFilter()" style="margin-left:5px">📏 EMA'ya 1ATR Yakın</button><button class="btn" id="rs85FilterBtn" onclick="toggleRs85Filter()" style="margin-left:5px">⚡ RS 85+</button><button class="btn" id="ms85FilterBtn" onclick="toggleMs85Filter()" style="margin-left:5px">🏆 MS 85+</button><span id="cloudFilterInfo" style="font-size:10px;color:rgba(255,255,255,.3);font-family:monospace;margin-left:8px"></span><button class="btn" onclick="exportTvList()" style="margin-left:12px;border-color:rgba(99,102,241,.3);color:rgba(165,180,252,.7)">📋 TV Liste</button></div>
 <div class="chart-grid" id="hisseChartGrid"></div>
 </div>
 </div>
@@ -360,7 +361,7 @@ tr.sr{cursor:pointer}tr.sr:hover{background:rgba(99,102,241,.06)}
 """
     h+="<script>\nconst R="+dj+";\n"
     h+=r"""let curP='1m',curSec=null,sC=-1,sA=false,barSort='perf',curView='table';
-let hisseP='1m',hisseSC=-1,hisseSA=false,hisseViewMode='table',cloudFilter=false,atrFilter=false,rs85Filter=false;
+let hisseP='1m',hisseSC=-1,hisseSA=false,hisseViewMode='table',cloudFilter=false,atrFilter=false,rs85Filter=false,ms85Filter=false;
 const miniCharts=[];
 // ===== MAIN TAB SWITCHING =====
 function switchMain(panel,btn){
@@ -587,6 +588,10 @@ function toggleRs85Filter(){rs85Filter=!rs85Filter;
 const btn=document.getElementById('rs85FilterBtn');
 btn.classList.toggle('a',rs85Filter);
 renderHisse()}
+function toggleMs85Filter(){ms85Filter=!ms85Filter;
+const btn=document.getElementById('ms85FilterBtn');
+btn.classList.toggle('a',ms85Filter);
+renderHisse()}
 // ===== HİSSE TAB FUNCTIONS =====
 function setHisseView(v,btn){hisseViewMode=v;document.querySelectorAll('#hisseTabs .tab').forEach(b=>b.classList.remove('a'));if(btn)btn.classList.add('a');
 document.getElementById('hisseTableWrap').style.display=v==='table'?'block':'none';
@@ -634,7 +639,8 @@ let filtered=tks;
 if(cloudFilter){filtered=filtered.filter(t=>isInCloud(t))}
 if(atrFilter){filtered=filtered.filter(t=>isNearEma(t))}
 if(rs85Filter){filtered=filtered.filter(t=>{const rs=R.stock_rs21[t];return typeof rs==='number'&&rs>=85})}
-if(cloudFilter||atrFilter||rs85Filter){info.textContent=filtered.length+'/'+tks.length+' hisse'}
+if(ms85Filter){filtered=filtered.filter(t=>{const ms=R.stock_rsms[t];return typeof ms==='number'&&ms>=85})}
+if(cloudFilter||atrFilter||rs85Filter||ms85Filter){info.textContent=filtered.length+'/'+tks.length+' hisse'}
 else{info.textContent=''}
 // Sort same as table
 const rows=filtered.map(t=>({t,p:R.stock_perf[t]}));
@@ -649,14 +655,22 @@ if(typeof va==='string')return hisseSA?va.localeCompare(vb):vb.localeCompare(va)
 return hisseSA?va-vb:vb-va})}
 else{rows.sort((a,b)=>{const va=a.p?a.p[hisseP]||0:0;const vb=b.p?b.p[hisseP]||0:0;return vb-va})}
 const rss=R.stock_rs21;
+const sortedSecs=Object.keys(R.sector_perf).sort((a,b)=>{const va=R.sector_perf[a][hisseP],vb=R.sector_perf[b][hisseP];if(va==null)return 1;if(vb==null)return -1;return vb-va});
+const secRank={};sortedSecs.forEach((s,i)=>{secRank[s]=i+1});
 let h='';
 rows.forEach(({t},idx)=>{
 const p=R.stock_perf[t];const chg=p?p[hisseP]:null;
 const chgC=chg!=null?(chg>0?'#4ade80':'#f87171'):'rgba(255,255,255,.4)';
 const rs=rss[t]||'-';
 const rsC=typeof rs==='number'&&rs>=80?'#4ade80':'#f87171';
+const ms=R.stock_rsms[t];
+const msTxt=(typeof ms==='number')?ms:'-';
+const msC=typeof ms==='number'&&ms>=80?'#4ade80':'#f87171';
 const sec=R.sector_map[t]||'';
-h+='<div class="mini-chart" onclick="showFin(\''+t+'\')"><div class="mc-hd"><span class="mc-name">'+t+' <span style="font-size:9px;font-weight:400;color:rgba(255,255,255,.3)">'+sec+'</span> <span style="font-size:11px;font-weight:700;color:'+rsC+'">RS:'+rs+'</span></span><span class="mc-chg" style="color:'+chgC+'">'+vF(chg)+'</span></div><canvas id="hmc_'+idx+'"></canvas></div>'});
+const rank=secRank[sec];
+const rankC=(typeof rank==='number')?(rank<=5?'#4ade80':rank<=10?'#38bdf8':'#fb923c'):'#fb923c';
+const rankTxt=rank?'<span style="font-size:10px;font-weight:700;color:'+rankC+'" title="Sektörün '+hisseP+' performans sırası">#'+rank+'</span> ':'';
+h+='<div class="mini-chart" onclick="showFin(\''+t+'\')"><div class="mc-hd"><span class="mc-name">'+t+' '+rankTxt+'<span style="font-size:9px;font-weight:400;color:rgba(255,255,255,.3)">'+sec+'</span> <span style="font-size:11px;font-weight:700;color:'+rsC+'">RS:'+rs+'</span> <span style="font-size:11px;font-weight:700;color:'+msC+'">MS:'+msTxt+'</span></span><span class="mc-chg" style="color:'+chgC+'">'+vF(chg)+'</span></div><canvas id="hmc_'+idx+'"></canvas></div>'});
 grid.innerHTML=h;
 // Draw candles (defer to avoid blocking)
 requestAnimationFrame(()=>{

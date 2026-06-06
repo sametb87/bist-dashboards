@@ -128,6 +128,8 @@ def _fetch_history(ticker, period=None, start=None, retries=4):
                 return None
             if hasattr(df.index, "tz") and df.index.tz is not None:
                 df.index = df.index.tz_convert(None)
+            _today = date.today().strftime("%Y-%m-%d")
+            df = df[df.index.strftime("%Y-%m-%d") < _today]
             return df.dropna(subset=["Close"])
         except Exception as e:
             err = str(e).lower()

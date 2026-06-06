@@ -3,8 +3,6 @@ name: BIST Dashboards Update
 on:
   schedule:
     - cron: '42 15 * * 1-5'
-    - cron: '52 16 * * 1-5'
-    - cron: '18 17 * * 1-5'
   workflow_dispatch:
 
 jobs:

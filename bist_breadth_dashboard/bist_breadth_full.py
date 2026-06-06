@@ -100,6 +100,8 @@ def fetch1(t,period="10y",start=None,end=None):
         df=tk.history(start=start,end=end) if start else tk.history(period=period)
         if df is None or df.empty:return None
         if df.index.tz is not None:df.index=df.index.tz_localize(None)
+        df=df.dropna(subset=["Close"])
+        if "Volume" in df.columns:df=df[~((df["Open"]==df["High"])&(df["High"]==df["Low"])&(df["Low"]==df["Close"])&(df["Volume"]==0))]
         df["Ticker"]=t;return df
     except:return None
 
@@ -261,7 +263,8 @@ def fetch_index():
             print("    ⚠️ XU100 verisi alınamadı")
             return {}
         if df.index.tz is not None:df.index=df.index.tz_localize(None)
-        idx={d:round(float(c),2) for d,c in zip(df.index.strftime("%Y-%m-%d"),df["Close"])}
+        if "Volume" in df.columns:df=df[~((df["Open"]==df["High"])&(df["High"]==df["Low"])&(df["Low"]==df["Close"])&(df["Volume"]==0))]
+        idx={d:round(float(c),2) for d,c in zip(df.index.strftime("%Y-%m-%d"),df["Close"]) if not (isinstance(c,float) and __import__('math').isnan(c))}
         IF.write_text(json.dumps(idx,ensure_ascii=False),"utf-8")
         print(f"    ✅ {len(idx)} gün endeks verisi")
         return idx
@@ -282,7 +285,9 @@ def update_index():
         df=tk.history(period=per)
         if df is not None and not df.empty:
             if df.index.tz is not None:df.index=df.index.tz_localize(None)
+            if "Volume" in df.columns:df=df[~((df["Open"]==df["High"])&(df["High"]==df["Low"])&(df["Low"]==df["Close"])&(df["Volume"]==0))]
             for d,c in zip(df.index.strftime("%Y-%m-%d"),df["Close"]):
+                if isinstance(c,float) and __import__('math').isnan(c):continue
                 existing[d]=round(float(c),2)
             IF.write_text(json.dumps(existing,ensure_ascii=False),"utf-8")
             print(f"    ✅ {len(existing)} gün")

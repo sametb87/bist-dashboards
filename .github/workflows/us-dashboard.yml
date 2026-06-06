@@ -2,9 +2,7 @@ name: US Sector Dashboard Update
 
 on:
   schedule:
-    - cron: '7 21 * * 0-5'
-    - cron: '23 4 * * 1-6'
-    - cron: '17 6 * * 1-6'
+    - cron: '0 23 * * 1-5'
   workflow_dispatch:
 
 jobs:
